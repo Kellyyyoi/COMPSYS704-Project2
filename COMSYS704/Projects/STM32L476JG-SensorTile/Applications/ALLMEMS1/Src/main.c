@@ -186,32 +186,50 @@ static void InitLSM() {
 
 static void startMag() {
 	//#CS704 - Write SPI commands to initiliase Magnetometer
+	uint8_t data;
+
+	/* 100 Hz output data rate, continuous-conversion mode. */
+	data = 0x8C;
+	BSP_LSM303AGR_WriteReg_Mag(0x60, &data, 1);
 }
 
 static void startAcc() {
 	//#CS704 - Write SPI commands to initiliase Accelerometer
+	uint8_t data;
+
+	/* 100 Hz output data rate with all axes enabled. */
+	data = 0x57;
+	BSP_LSM303AGR_WriteReg_Acc(0x20, &data, 1);
+
+	/* High-resolution mode and block data update. */
+	data = 0x89;
+	BSP_LSM303AGR_WriteReg_Acc(0x23, &data, 1);
 }
 
 static void readMag() {
+	uint8_t data[6];
 
 	//#CS704 - Read Magnetometer Data over SPI
+	BSP_LSM303AGR_ReadReg_Mag(0x68, data, 6);
 
 	//#CS704 - store sensor values into the variables below
-	MAG_Value.x=100;
-	MAG_Value.y=200;
-	MAG_Value.z=1000;
+	MAG_Value.x = (int16_t)((data[1] << 8) | data[0]);
+	MAG_Value.y = (int16_t)((data[3] << 8) | data[2]);
+	MAG_Value.z = (int16_t)((data[5] << 8) | data[4]);
 
 //	XPRINTF("MAG=%d,%d,%d\r\n",magx,magy,magz);
 }
 
 static void readAcc() {
+	uint8_t data[6];
 
 	//#CS704 - Read Accelerometer Data over SPI
+	BSP_LSM303AGR_ReadReg_Acc(0x28, data, 6);
 
 	//#CS704 - store sensor values into the variables below
-	ACC_Value.x=100;
-	ACC_Value.y=200;
-	ACC_Value.z=1000;
+	ACC_Value.x = ((int16_t)((data[1] << 8) | data[0])) >> 4;
+	ACC_Value.y = ((int16_t)((data[3] << 8) | data[2])) >> 4;
+	ACC_Value.z = ((int16_t)((data[5] << 8) | data[4])) >> 4;
 
 //	XPRINTF("ACC=%d,%d,%d\r\n",accx,accy,accz);
 }
@@ -255,13 +273,13 @@ int main(void)
   //***************************************************
 
   //#CS704 - use this to set BLE Device Name
-  NodeName[1] = 'A';
-  NodeName[2] = 'B';
-  NodeName[3] = 'C';
-  NodeName[4] = 'D';
-  NodeName[5] = 'E';
-  NodeName[6] = 'F';
-  NodeName[7] = 'G';
+  NodeName[1] = 'C';
+  NodeName[2] = 'S';
+  NodeName[3] = '7';
+  NodeName[4] = '0';
+  NodeName[5] = '4';
+  NodeName[6] = '0';
+  NodeName[7] = '5';
 
   startMag();
   startAcc();
