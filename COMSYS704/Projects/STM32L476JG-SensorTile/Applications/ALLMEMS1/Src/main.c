@@ -55,6 +55,12 @@
 /* Shutdown mode enabled as default for SensorTile */
 #define ENABLE_SHUT_DOWN_MODE 0
 
+/* Step counter parameters */
+#define STEP_HIGH_THRESHOLD_MG    1150.0f
+#define STEP_LOW_THRESHOLD_MG     1050.0f
+#define STEP_MIN_INTERVAL_MS       300U
+#define ACC_FILTER_NEW_WEIGHT      0.20f
+
 
 #define BSP_LSM6DSM_INT2_GPIO_PORT           GPIOA
 #define BSP_LSM6DSM_INT2_GPIO_CLK_ENABLE()   __GPIOA_CLK_ENABLE()
@@ -140,6 +146,12 @@ typedef struct  {
 BSP_MOTION_SENSOR_Axes_t ACC_Value;
 COMP_Data COMP_Value;
 BSP_MOTION_SENSOR_Axes_t MAG_Value;
+
+/* Member A: step detector state */
+static float filteredAccMagnitude = 1000.0f;
+static uint8_t stepPeakDetected = 0U;
+static uint32_t lastStepTime = 0U;
+static uint32_t lastAccPrintTime = 0U;
 /* Private function prototypes -----------------------------------------------*/
 static void SystemClock_Config(void);
 
@@ -234,6 +246,51 @@ static void readAcc() {
 //	XPRINTF("ACC=%d,%d,%d\r\n",accx,accy,accz);
 }
 
+static void updateStepCounter(void)
+{
+    const float ax = (float)ACC_Value.x;
+    const float ay = (float)ACC_Value.y;
+    const float az = (float)ACC_Value.z;
+    const float magnitude = sqrtf((ax * ax) + (ay * ay) + (az * az));
+    const uint32_t currentTime = HAL_GetTick();
+
+    /* Low-pass filter. */
+    filteredAccMagnitude =
+        ((1.0f - ACC_FILTER_NEW_WEIGHT) * filteredAccMagnitude) +
+        (ACC_FILTER_NEW_WEIGHT * magnitude);
+
+    /* Detect the rising part of a step. */
+    if ((stepPeakDetected == 0U) &&
+        (filteredAccMagnitude > STEP_HIGH_THRESHOLD_MG) &&
+        ((currentTime - lastStepTime) >= STEP_MIN_INTERVAL_MS))
+    {
+        stepPeakDetected = 1U;
+    }
+
+    /* Confirm the step after the peak falls. */
+    if ((stepPeakDetected != 0U) &&
+        (filteredAccMagnitude < STEP_LOW_THRESHOLD_MG))
+    {
+        COMP_Value.Steps++;
+        lastStepTime = currentTime;
+        stepPeakDetected = 0U;
+    }
+
+    /* Print data twice per second for testing. */
+    if ((currentTime - lastAccPrintTime) >= 500U)
+    {
+        lastAccPrintTime = currentTime;
+        XPRINTF(
+            "ACC=%ld,%ld,%ld MAG=%ld STEPS=%lu\r\n",
+            (long)ACC_Value.x,
+            (long)ACC_Value.y,
+            (long)ACC_Value.z,
+            (long)filteredAccMagnitude,
+            (unsigned long)COMP_Value.Steps
+        );
+    }
+}
+
 /**
   * @brief  Main program
   * @param  None
@@ -284,6 +341,10 @@ int main(void)
   startMag();
   startAcc();
 
+  COMP_Value.Steps = 0U;
+  COMP_Value.Heading = 0U;
+  COMP_Value.Distance = 0U;
+
   uint8_t BufferToWrite[10] = "ABCDE";
   //***************************************************
   //***************************************************
@@ -331,11 +392,9 @@ int main(void)
 
 	//*********process sensor data*********
 
-    	COMP_Value.Steps++;
-    	COMP_Value.Heading+=5;
-    	COMP_Value.Distance+=10;
+	updateStepCounter();
 
-    	XPRINTF("Steps = %d \r\n",(int)COMP_Value.Steps);
+	/* Heading and distance will be implemented by Member B. */
 
     }
 
