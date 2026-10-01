@@ -146,6 +146,18 @@ typedef struct  {
 BSP_MOTION_SENSOR_Axes_t ACC_Value;
 COMP_Data COMP_Value;
 BSP_MOTION_SENSOR_Axes_t MAG_Value;
+volatile uint8_t magConfigCReadback = 0;
+volatile uint8_t magConfigAReadback = 0;
+
+/* Magnetometer calibration capture: indices 0=X, 1=Y, 2=Z. */
+volatile uint32_t magCalActive = 0;
+volatile uint32_t magCalCount = 0;
+volatile int32_t magMin[3] = {0, 0, 0};
+volatile int32_t magMax[3] = {0, 0, 0};
+#define MAG_LOG_CAPACITY 1024U
+volatile int16_t magSamples[MAG_LOG_CAPACITY][3];
+volatile int16_t accSamples[MAG_LOG_CAPACITY][3];
+volatile uint32_t magSampleTime[MAG_LOG_CAPACITY];
 
 /* Member A: step detector state */
 static float filteredAccMagnitude = 1000.0f;
@@ -196,13 +208,25 @@ static void InitLSM() {
 }
 
 
-static void startMag() {
-	//#CS704 - Write SPI commands to initiliase Magnetometer
-	uint8_t data;
+static void startMag(void)
+{
+    uint8_t data;
 
-	/* 100 Hz output data rate, continuous-conversion mode. */
-	data = 0x8C;
-	BSP_LSM303AGR_WriteReg_Mag(0x60, &data, 1);
+    /* Enable BDU and keep I2C disabled for SPI operation. */
+    data = 0x30;
+    BSP_LSM303AGR_WriteReg_Mag(0x62, &data, 1);
+
+    /* Read back the configuration for verification. */
+    uint8_t config = 0;
+    BSP_LSM303AGR_ReadReg_Mag(0x62, &config, 1);
+    magConfigCReadback = config;
+
+    /* 100 Hz, continuous-conversion mode. */
+    data = 0x8C;
+    BSP_LSM303AGR_WriteReg_Mag(0x60, &data, 1);
+    uint8_t configA = 0;
+    BSP_LSM303AGR_ReadReg_Mag(0x60, &configA, 1);
+    magConfigAReadback = configA;
 }
 
 static void startAcc() {
@@ -225,9 +249,9 @@ static void readMag() {
 	BSP_LSM303AGR_ReadReg_Mag(0x68, data, 6);
 
 	//#CS704 - store sensor values into the variables below
-	MAG_Value.x = (int16_t)((data[1] << 8) | data[0]);
-	MAG_Value.y = (int16_t)((data[3] << 8) | data[2]);
-	MAG_Value.z = (int16_t)((data[5] << 8) | data[4]);
+	MAG_Value.x = (int16_t)(((uint16_t)data[1] << 8) | data[0]);
+	MAG_Value.y = (int16_t)(((uint16_t)data[3] << 8) | data[2]);
+	MAG_Value.z = (int16_t)(((uint16_t)data[5] << 8) | data[4]);
 
 //	XPRINTF("MAG=%d,%d,%d\r\n",magx,magy,magz);
 }
@@ -244,6 +268,109 @@ static void readAcc() {
 	ACC_Value.z = ((int16_t)((data[5] << 8) | data[4])) >> 4;
 
 //	XPRINTF("ACC=%d,%d,%d\r\n",accx,accy,accz);
+}
+/* Uncalibrated magnetic angle in the sensor XY plane.
+ * For initial testing with the board held level.
+ */
+static void collectMagCalibration(void)
+{
+    static uint32_t lastSampleTime = 0U;
+
+    if (magCalActive == 0U)
+        return;
+
+    uint32_t index = magCalCount;
+
+    if (index >= MAG_LOG_CAPACITY)
+    {
+        magCalActive = 0U;
+        return;
+    }
+
+    uint32_t now = HAL_GetTick();
+
+    /* Record at intervals of at least 100 ms. */
+    if ((index != 0U) &&
+        ((uint32_t)(now - lastSampleTime) < 100U))
+        return;
+
+    lastSampleTime = now;
+    magSampleTime[index] = now;
+
+    magSamples[index][0] = (int16_t)MAG_Value.x;
+    magSamples[index][1] = (int16_t)MAG_Value.y;
+    magSamples[index][2] = (int16_t)MAG_Value.z;
+
+    accSamples[index][0] = (int16_t)ACC_Value.x;
+    accSamples[index][1] = (int16_t)ACC_Value.y;
+    accSamples[index][2] = (int16_t)ACC_Value.z;
+
+    int32_t values[3] = {
+        MAG_Value.x, MAG_Value.y, MAG_Value.z
+    };
+
+    for (int i = 0; i < 3; i++)
+    {
+        if (index == 0U)
+        {
+            magMin[i] = values[i];
+            magMax[i] = values[i];
+        }
+        else
+        {
+            if (values[i] < magMin[i])
+                magMin[i] = values[i];
+
+            if (values[i] > magMax[i])
+                magMax[i] = values[i];
+        }
+    }
+
+    magCalCount = index + 1U;
+
+    if (magCalCount >= MAG_LOG_CAPACITY)
+        magCalActive = 0U;
+}
+
+static void updateHeading(void)
+{
+    static float historyX[10] = {0};
+    static float historyY[10] = {0};
+    static float sumX = 0.0f;
+    static float sumY = 0.0f;
+    static uint32_t index = 0U;
+    static uint32_t count = 0U;
+
+    /* Remove the oldest reading. */
+    sumX -= historyX[index];
+    sumY -= historyY[index];
+
+    /* Store the latest signed magnetic readings. */
+    historyX[index] = (float)MAG_Value.x;
+    historyY[index] = (float)MAG_Value.y;
+
+    sumX += historyX[index];
+    sumY += historyY[index];
+
+    index = (index + 1U) % 10U;
+
+    if (count < 10U)
+        count++;
+
+    /* Average first, then apply the existing trial offsets. */
+    float mx = sumX / (float)count - 73.0f;
+    float my = sumY / (float)count + 9.5f;
+
+    if ((mx == 0.0f) && (my == 0.0f))
+        return;
+
+    float angle = atan2f(my, mx) * 57.2957795f;
+
+    if (angle < 0.0f)
+        angle += 360.0f;
+
+    uint32_t degrees = (uint32_t)(angle + 0.5f);
+    COMP_Value.Heading = degrees % 360U;
 }
 
 static void updateStepCounter(void)
@@ -389,11 +516,14 @@ int main(void)
 	//*********get sensor data**********
     	readMag();
     	readAcc();
+    	collectMagCalibration();
+
 
 	//*********process sensor data*********
 
 	updateStepCounter();
-
+	updateHeading();
+	/* Distance calculation is not implemented yet. */
 	/* Heading and distance will be implemented by Member B. */
 
     }

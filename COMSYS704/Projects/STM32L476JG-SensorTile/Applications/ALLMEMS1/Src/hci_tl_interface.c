@@ -195,6 +195,8 @@ int32_t HCI_TL_SPI_Send(uint8_t* buffer, uint16_t size)
   
   do
   {
+	uint32_t irqWasEnabled = NVIC_GetEnableIRQ(HCI_TL_SPI_EXTI_IRQn);
+	HAL_NVIC_DisableIRQ(HCI_TL_SPI_EXTI_IRQn);
     result = 0;
     
     /* CS reset */
@@ -222,6 +224,10 @@ int32_t HCI_TL_SPI_Send(uint8_t* buffer, uint16_t size)
     
     /* Release CS line */
     HAL_GPIO_WritePin(HCI_TL_SPI_CS_PORT, HCI_TL_SPI_CS_PIN, GPIO_PIN_SET);
+    if (irqWasEnabled != 0U)
+    {
+        HAL_NVIC_EnableIRQ(HCI_TL_SPI_EXTI_IRQn);
+    }
     
     if((HAL_GetTick() - tickstart) > TIMEOUT_DURATION)
     {
