@@ -54,13 +54,11 @@
 
 /* Shutdown mode enabled as default for SensorTile */
 #define ENABLE_SHUT_DOWN_MODE 0
-
 /* Step counter parameters */
 #define STEP_HIGH_THRESHOLD_MG    1150.0f
 #define STEP_LOW_THRESHOLD_MG     1050.0f
 #define STEP_MIN_INTERVAL_MS       300U
-#define ACC_FILTER_NEW_WEIGHT      0.20f
-
+#define ACC_FILTER_NEW_WEIGHT      0.40f
 
 #define BSP_LSM6DSM_INT2_GPIO_PORT           GPIOA
 #define BSP_LSM6DSM_INT2_GPIO_CLK_ENABLE()   __GPIOA_CLK_ENABLE()
@@ -164,6 +162,7 @@ static float filteredAccMagnitude = 1000.0f;
 static uint8_t stepPeakDetected = 0U;
 static uint32_t lastStepTime = 0U;
 static uint32_t lastAccPrintTime = 0U;
+
 /* Private function prototypes -----------------------------------------------*/
 static void SystemClock_Config(void);
 
@@ -204,7 +203,7 @@ static void InitLSM() {
 	BSP_LSM303AGR_ReadReg_Mag(0x4F,inData,1);
 	XPRINTF("IAM Mag= %d,%d",inData[0],inData[1]);
 	BSP_LSM303AGR_ReadReg_Acc(0x0F,inData,1);
-	XPRINTF("IAM Acc= %d,%d",inData[0],inData[1]);
+	XPRINTF("ACC WHO_AM_I = 0x%02X\r\n", (unsigned int)inData[0]);
 }
 
 
@@ -240,6 +239,16 @@ static void startAcc() {
 	/* High-resolution mode and block data update. */
 	data = 0x89;
 	BSP_LSM303AGR_WriteReg_Acc(0x23, &data, 1);
+	/* Read back the accelerometer configuration. */
+	uint8_t ctrl1 = 0;
+	uint8_t ctrl4 = 0;
+
+	BSP_LSM303AGR_ReadReg_Acc(0x20, &ctrl1, 1);
+	BSP_LSM303AGR_ReadReg_Acc(0x23, &ctrl4, 1);
+
+	XPRINTF("ACC config: CTRL1=0x%02X CTRL4=0x%02X\r\n",
+	        (unsigned int)ctrl1,
+	        (unsigned int)ctrl4);
 }
 
 static void readMag() {
@@ -378,23 +387,28 @@ static void updateStepCounter(void)
     const float ax = (float)ACC_Value.x;
     const float ay = (float)ACC_Value.y;
     const float az = (float)ACC_Value.z;
-    const float magnitude = sqrtf((ax * ax) + (ay * ay) + (az * az));
+
+    const float magnitude =
+            sqrtf((ax * ax) + (ay * ay) + (az * az));
+
     const uint32_t currentTime = HAL_GetTick();
 
-    /* Low-pass filter. */
+    /* Low-pass filter */
     filteredAccMagnitude =
-        ((1.0f - ACC_FILTER_NEW_WEIGHT) * filteredAccMagnitude) +
-        (ACC_FILTER_NEW_WEIGHT * magnitude);
+            ((1.0f - ACC_FILTER_NEW_WEIGHT) *
+             filteredAccMagnitude) +
+            (ACC_FILTER_NEW_WEIGHT * magnitude);
 
-    /* Detect the rising part of a step. */
+    /* Detect the rising part of a step */
     if ((stepPeakDetected == 0U) &&
         (filteredAccMagnitude > STEP_HIGH_THRESHOLD_MG) &&
-        ((currentTime - lastStepTime) >= STEP_MIN_INTERVAL_MS))
+        ((currentTime - lastStepTime) >=
+         STEP_MIN_INTERVAL_MS))
     {
         stepPeakDetected = 1U;
     }
 
-    /* Confirm the step after the peak falls. */
+    /* Confirm the step after the peak falls */
     if ((stepPeakDetected != 0U) &&
         (filteredAccMagnitude < STEP_LOW_THRESHOLD_MG))
     {
@@ -403,12 +417,13 @@ static void updateStepCounter(void)
         stepPeakDetected = 0U;
     }
 
-    /* Print data twice per second for testing. */
+    /* Print data twice per second for testing */
     if ((currentTime - lastAccPrintTime) >= 500U)
     {
         lastAccPrintTime = currentTime;
+
         XPRINTF(
-            "ACC=%ld,%ld,%ld MAG=%ld STEPS=%lu\r\n",
+        	"ACC_RAW=%ld,%ld,%ld ACC_NORM_FILTERED=%ld STEPS=%lu\r\n",
             (long)ACC_Value.x,
             (long)ACC_Value.y,
             (long)ACC_Value.z,
@@ -509,7 +524,10 @@ int main(void)
     //***************************************************
     //***************************************************
 
-    //#CS704 - ReadSensor gets set every 100ms by Timer TIM4 (TimEnvHandle)
+    /* TIM4 requests sensor processing every 65.6 ms (~15.24 Hz)
+     * with the current clock and timer configuration.
+     * The accelerometer output data rate is 100 Hz.
+     */
     if(ReadSensor) {
     	ReadSensor=0;
 
@@ -524,7 +542,6 @@ int main(void)
 	updateStepCounter();
 	updateHeading();
 	/* Distance calculation is not implemented yet. */
-	/* Heading and distance will be implemented by Member B. */
 
     }
 
@@ -663,10 +680,22 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   */
 static void SendMotionData(void)
 {
+	    BSP_MOTION_SENSOR_Axes_t accMg;
 
-  AccGyroMag_Update(&ACC_Value,(BSP_MOTION_SENSOR_Axes_t*)&COMP_Value,&MAG_Value);
-}
+	    /* Convert accelerometer counts to mg.
+	     * LSM303AGR: +/-2g, high-resolution mode.
+	     * Typical sensitivity: 0.98 mg/count.
+	     */
+	    accMg.x = (int32_t)lroundf((float)ACC_Value.x * 0.98f);
+	    accMg.y = (int32_t)lroundf((float)ACC_Value.y * 0.98f);
+	    accMg.z = (int32_t)lroundf((float)ACC_Value.z * 0.98f);
 
+	    AccGyroMag_Update(
+	        &accMg,
+	        (BSP_MOTION_SENSOR_Axes_t *)&COMP_Value,
+	        &MAG_Value
+	    );
+	}
 
 
 /**
